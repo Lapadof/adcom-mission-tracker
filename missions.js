@@ -352,7 +352,7 @@ function renderMissions() {
     sortedRanks = ["Completed", "Current", currentMainRank];
   }
   
-  
+
   for (let rank of sortedRanks) {
     if (missionData[rank].Remaining.length == 0 && currentMode == "event" && rank != 'Completed') {
       continue;
@@ -380,7 +380,7 @@ function renderMissions() {
         rankTitle = `${currentMainRank} (${missingCount}/${missionData[currentMainRank].StartingCount})`;
       }
       
-      title = `Current <span class="currentRank float-right">Rank ${rankTitle}</span>`;
+      title = `Current <button id="estimationButton" class="btn btn-primary" onclick="updateEstimations()">Estimate missions ETA</button><span class="currentRank float-right">Rank ${rankTitle}</span>`;
     } else if (currentMode == "main") {
       // A generic MAIN rank
       let buttonsHtml = "";
@@ -541,7 +541,7 @@ function renderMissionButton(mission, rank) {
   
   let infoClass = hasScriptedReward(mission) ? "scriptedRewardInfo" : ""; 
   
-  return `<button class="btn ${buttonClass}" onclick="clickMission('${mission.Id}')" title="${buttonDescription}">${describeMission(mission)}</button><a href="#" class="btn btn-link infoButton ${infoClass}" data-toggle="modal" data-target="#infoPopup" data-mission="${mission.Id}" title="Click for mission info/calc">&#9432;</a>`;
+  return `<button class="btn ${buttonClass}" onclick="clickMission('${mission.Id}')" title="${buttonDescription}">${describeMission(mission)}<span id="estimation" data-mission="${mission.Id}"/></button><a href="#" class="btn btn-link infoButton ${infoClass}" data-toggle="modal" data-target="#infoPopup" data-mission="${mission.Id}" title="Click for mission info/calc">&#9432;</a>`;
 }
 
 var scriptedRewardIds = null;
@@ -1085,6 +1085,171 @@ function getData() {
   return DATA[currentMode];
 }
 
+//******** GLOBAL ESTIMATION CALCULATOR  **********/
+function toEta(totaSeconds) {
+  /* From https://stackoverflow.com/questions/1322732/convert-seconds-to-hh-mm-ss-with-javascript */
+  let days = Math.floor(totaSeconds / (60 * 60 * 24));
+  let [hours, minutes, seconds] = new Date(totaSeconds * 1000).toISOString().substr(11, 8).split(':');
+
+  let eta = '';
+  if (days > 0) {
+    eta = `${days}d ${hours}h ${minutes}m ${seconds}s`;
+  } else if (hours > 0) {
+    eta = `${hours}h ${minutes}m ${seconds}s`;
+  } else if (minutes > 0) {
+    eta = `${minutes}m ${seconds}s`;
+  } else {
+    eta = `${seconds}s`;
+  }  
+  return eta;
+}
+
+function getIndustriesBasicSimData(industryId) {
+  let formValues = getFormValuesObject();
+  let resourceId = getResourceByIndustry(industryId).Id;
+
+  // combine any values that may exist for the industry or globally
+  let industryValues = formValues[industryId] || {};
+  let industryCountValues = formValues[industryId+'-count'] || {};
+  let globalValues = formValues["global"] || {};
+  let combinedValues = mergeObjects(mergeObjects(industryValues, industryCountValues), globalValues);
+    
+  let generators = getData().Generators.filter(g => g.IndustryId == industryId);
+  
+  let simData = { Generators: [], Counts: {}, IndustryId: industryId};
+  
+  // Dig out and parse each number in the form.
+  let comrades = combinedValues['#comrades'] || 0;
+  let comradesPerSec = combinedValues['#comradesPerSec']  || 0;
+  let power = combinedValues['#power']  || 1;
+  let discount = combinedValues['#discount']  || 1;
+  let critChance = (combinedValues['#critChance'] / 100) || 0;
+  let critPower = combinedValues['#critPower'] || 1;
+
+  simData.Generators.push({Id: "comradegenerator", Resource: "comrade", QtyPerSec: comradesPerSec, Cost: []});
+  simData.Counts["comrade"] = comrades;
+  simData.Counts["comradegenerator"] = 1;
+
+  for (let generator of generators) {
+    let genCount = combinedValues[`#${generator.Id}-count`] || 0;
+    let genSpeed = combinedValues[`#${generator.Id}-speed`] || 0;
+    
+    // A band-aid fix until I properly overhaul the calc
+    let genPower = 1;
+    if (currentMode == "main" && generator.Id == generators[0].Id) {
+      genPower = combinedValues[`#${generator.Id}-power`] || 1;
+    }
+    
+    let costs = generator.Cost.map(c => ({ Resource: c.Resource.toLowerCase(), Qty: Number(c.Qty) }));
+    for (let cost of costs) {
+      if (cost.Resource != "comrade") {
+        cost.Qty /= discount;
+      }
+    }
+    
+    simData.Generators.push(({
+      Id: generator.Id,
+      Resource: generator.Generate.Resource,
+      QtyPerSec: generator.Generate.Qty / generator.BaseCompletionTime * power * genPower * genSpeed * (critChance * critPower + 1 - critChance),
+      AQty: generator.Generate.Qty,
+      ABase: generator.BaseCompletionTime,
+      APower: power,
+      AGenPower: genPower,
+      ACritChance: critChance,
+      ACritPower: critPower,
+      ACriteBonus: (critChance * critPower + 1 - critChance),
+      Cost: costs
+    }));
+    
+    simData.Counts[generator.Id] = genCount;
+  }
+  
+  let resources = combinedValues['#resources'] || 0;
+  simData.Counts[resourceId] = resources;
+
+  let resourceProgress = 0;
+  resourceProgress =  combinedValues['#resourceProgress'] || 0;
+  simData.Counts["resourceProgress"] = resourceProgress;
+  
+  return simData;
+}
+
+function updateEstimations() {
+  $('#estimation').text('');
+  $('#estimation').removeAttr('style');
+  $('#estimationButton').attr('disabled', 'true');
+  $('#estimationButton').addClass('disabled');   
+
+  let sortedRanks;
+  if (currentMode == "event") {
+    sortedRanks = ["Current"];
+    for (let r of Object.keys(missionData)) {
+      if (missionData[r].Remaining.length>0) {
+        sortedRanks.push(r);
+        break;
+      }      
+    }
+  } else {
+    sortedRanks = ["Current", currentMainRank];
+  }
+ 
+  for (let rank of sortedRanks) {  
+    for (let mission of missionData[rank].Remaining) {
+      let condition = mission.Condition;
+      let conditionType = condition.ConditionType;      
+      if (!["ResourceQuantity", "IndustryUnlocked", "ResourcesEarnedSinceSubscription"].includes(conditionType)) {
+        continue;
+      }
+      // First figure out which industry to display and calculate
+      let industryId = "";
+      if (conditionType == "ResourceQuantity") {
+        industryId = getGenerator(condition.ConditionId).IndustryId;
+      } else if (conditionType == "IndustryUnlocked") {
+        // Choose the industry to the left of the one to unlock.
+        let unlockableIndustryIndex = getData().Industries.findIndex(i => i.Id == condition.ConditionId);
+        industryId = getData().Industries[unlockableIndustryIndex - 1].Id;
+      } else if (conditionType == "ResourcesEarnedSinceSubscription") {
+        if (condition.ConditionId.toLowerCase() == "scientist") {
+          // We currently don't support a calculator collecting science
+          return "Mission type currently unsupported.  Check back next event!";
+        }
+        
+        industryId = getIndustryByResource(condition.ConditionId).Id;
+      }
+
+      let simData = getIndustriesBasicSimData(industryId);
+      simData.Mission = mission;
+      simData.Config = { Autobuy: true, MaxDays: 1 };      
+
+      let resultComrade = 0;
+      if (conditionType == "ResourceQuantity") {
+        resultComrade = calcLimitedComrades(simData);          
+      }
+      let result = simulateProductionMission(simData);
+
+      if (result == -1) {
+        $(`#estimation[data-mission=${mission.Id}`).html(`<br>ETA: More than ${simData.Config.MaxDays} days. Increase max day limit.`);
+        $(`#estimation[data-mission=${mission.Id}`).css('color','red');
+      } else if (result == 0) {
+        $(`#estimation[data-mission=${mission.Id}`).html(`<br>Completed`);
+        $(`#estimation[data-mission=${mission.Id}`).css('color','green');
+      } else {
+        let status = `<br>ETA: ${toEta(result)}`;
+        if (resultComrade>0) {
+          status += `<br>ComradeTime: ${toEta(resultComrade)}`;
+        }
+        
+        $(`#estimation[data-mission=${mission.Id}`).html(status);
+        $(`#estimation[data-mission=${mission.Id}`).css('color','black');
+      }
+      
+      $(`#estimation[data-mission=${mission.Id}`).effect('highlight', {}, 2000);
+    }
+  }
+
+  $('#estimationButton').removeAttr('disabled');
+  $('#estimationButton').removeClass('disabled');
+}
 
 /******* CALCULATOR STUFF ******/
 
@@ -1136,7 +1301,7 @@ function renderCalculator(mission) {
       html += "<td></td></tr>";
     }
     html += "</table>";
-    
+    html += `<a href="#" onclick="clearCalculatorResourceCounts()">Clear resouce counts</a>`;
     html += `<div class="form-check"><input class="form-check-input" type="checkbox" value="" id="configAutobuy"><label class="form-check-label" for="configAutobuy">Auto-buy highest-tier generator</label></div>`;
     
     if (conditionType == "ResourceQuantity") {
@@ -1159,6 +1324,25 @@ function renderCalculator(mission) {
 function clickComradeLimited(generatorId) {
   let checked = $('#configComradeLimited').is(':checked');
   $("#calc input[type='text'],input[type='number']").not(`#comradesPerSec,#${generatorId}-count`).prop("disabled", checked);
+}
+
+function clearCalculatorResourceCounts() {
+  let industryId = $('#industryId').val();
+  let resourceId = getResourceByIndustry(industryId).Id;
+  let missionId = $('#missionId').val();
+  let mission = getData().Missions.find(m => m.Id == missionId);
+  let generators = getData().Generators.filter(g => g.IndustryId == industryId);
+  let comrades = getValueFromForm('#comrades', 0, simData, formValues);
+  for (let generator of generators) {
+    let genCount = getValueFromForm(`#${generator.Id}-count`, 0, simData, formValues);
+    let resources = getValueFromForm('#resources', 0, simData, formValues);
+    simData.Counts[resourceId] = resources;
+  
+    let resourceProgress = 0;
+    if (mission.Condition.ConditionType == "ResourcesEarnedSinceSubscription") {
+      resourceProgress = getValueFromForm('#resourceProgress', 0, simData, formValues);
+    }
+  } 
 }
 
 // Called OnClick for "Calculate!"  Interprets input, runs calc/sim, and outputs result.
@@ -1203,7 +1387,7 @@ function doProductionSim() {
     } else {
       eta = `${seconds}s`;
     }
-    
+
     $('#result').text(`ETA: ${eta}`);
   }
   
@@ -1222,7 +1406,7 @@ function getProductionSimDataFromForm() {
   // Dig out and parse each number in the form.
   let formValues = {};
   let globalFormValues = {};
-  let comrades = getValueFromForm('#comrades', 0, simData, null);
+  let comrades = getValueFromForm('#comrades', 0, simData, formValues);
   let comradesPerSec = getValueFromForm('#comradesPerSec', 0, simData, globalFormValues);
   let power = getValueFromForm('#power', 1, simData, formValues);
   let discount = getValueFromForm('#discount', 1, simData, formValues);
@@ -1234,7 +1418,7 @@ function getProductionSimDataFromForm() {
   simData.Counts["comradegenerator"] = 1;
     
   for (let generator of generators) {
-    let genCount = getValueFromForm(`#${generator.Id}-count`, 0, simData, null);
+    let genCount = getValueFromForm(`#${generator.Id}-count`, 0, simData, formValues);
     let genSpeed = getValueFromForm(`#${generator.Id}-speed`, 0, simData, formValues);
     
     // A band-aid fix until I properly overhaul the calc
@@ -1260,12 +1444,12 @@ function getProductionSimDataFromForm() {
     simData.Counts[generator.Id] = genCount;
   }
   
-  let resources = getValueFromForm('#resources', 0, simData, null);
+  let resources = getValueFromForm('#resources', 0, simData, formValues);
   simData.Counts[resourceId] = resources;
 
   let resourceProgress = 0;
   if (mission.Condition.ConditionType == "ResourcesEarnedSinceSubscription") {
-    resourceProgress = getValueFromForm('#resourceProgress', 0, simData, null);
+    resourceProgress = getValueFromForm('#resourceProgress', 0, simData, formValues);
   }
   simData.Counts["resourceProgress"] = resourceProgress;
   
@@ -1370,7 +1554,7 @@ function calcLimitedComrades(simData) {
   if (!comradeCost || !comradeGenerator || comradeGenerator.QtyPerSec == 0) {
     return -1;
   }
-  
+
   let gensNeeded = condition.Threshold - simData.Counts[condition.ConditionId];
   if (gensNeeded <= 0) {
     return 0;
@@ -1452,7 +1636,7 @@ function simulateProductionMission(simData, deltaTime = 1.0) {
       simData.Counts[autobuyGenerator.Id] += buyCount;
     }
   }
-  
+
   if (time >= maxTime) {
     return -1;
   } else {
