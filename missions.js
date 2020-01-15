@@ -1327,21 +1327,16 @@ function clickComradeLimited(generatorId) {
 }
 
 function clearCalculatorResourceCounts() {
-  let industryId = $('#industryId').val();
-  let resourceId = getResourceByIndustry(industryId).Id;
+  let industryId = $('#industryId').val();  
   let missionId = $('#missionId').val();
+
   let mission = getData().Missions.find(m => m.Id == missionId);
   let generators = getData().Generators.filter(g => g.IndustryId == industryId);
-  let comrades = getValueFromForm('#comrades', 0, simData, formValues);
+  $('#comrades').text('');
   for (let generator of generators) {
-    let genCount = getValueFromForm(`#${generator.Id}-count`, 0, simData, formValues);
-    let resources = getValueFromForm('#resources', 0, simData, formValues);
-    simData.Counts[resourceId] = resources;
-  
-    let resourceProgress = 0;
-    if (mission.Condition.ConditionType == "ResourcesEarnedSinceSubscription") {
-      resourceProgress = getValueFromForm('#resourceProgress', 0, simData, formValues);
-    }
+    $(`#${generator.Id}-count`).text('');
+    $('#resources').text('');
+    $('#resourceProgress');    
   } 
 }
 
@@ -1406,7 +1401,7 @@ function getProductionSimDataFromForm() {
   // Dig out and parse each number in the form.
   let formValues = {};
   let globalFormValues = {};
-  let comrades = getValueFromForm('#comrades', 0, simData, formValues);
+  let comrades = getValueFromForm('#comrades', 0, simData, globalFormValues);
   let comradesPerSec = getValueFromForm('#comradesPerSec', 0, simData, globalFormValues);
   let power = getValueFromForm('#power', 1, simData, formValues);
   let discount = getValueFromForm('#discount', 1, simData, formValues);
