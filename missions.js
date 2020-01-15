@@ -380,7 +380,7 @@ function renderMissions() {
         rankTitle = `${currentMainRank} (${missingCount}/${missionData[currentMainRank].StartingCount})`;
       }
       
-      title = `Current <button id="estimationButton" class="btn btn-primary" onclick="updateEstimations()">Estimate missions ETA</button><span class="currentRank float-right">Rank ${rankTitle}</span>`;
+      title = `Current <a id="estimationButton" style="font-size: 1rem;" href="#" onclick="updateEstimations()">Estimate missions ETA</button><span class="currentRank float-right">Rank ${rankTitle}</span>`;
     } else if (currentMode == "main") {
       // A generic MAIN rank
       let buttonsHtml = "";
@@ -541,7 +541,7 @@ function renderMissionButton(mission, rank) {
   
   let infoClass = hasScriptedReward(mission) ? "scriptedRewardInfo" : ""; 
   
-  return `<button class="btn ${buttonClass}" onclick="clickMission('${mission.Id}')" title="${buttonDescription}">${describeMission(mission)}<span id="estimation" data-mission="${mission.Id}"/></button><a href="#" class="btn btn-link infoButton ${infoClass}" data-toggle="modal" data-target="#infoPopup" data-mission="${mission.Id}" title="Click for mission info/calc">&#9432;</a>`;
+  return `<button id="btn-${mission.Id}" class="btn ${buttonClass}" onclick="clickMission('${mission.Id}')" title="${buttonDescription}">${describeMission(mission)}</button><a href="#" class="btn btn-link infoButton ${infoClass}" data-toggle="modal" data-target="#infoPopup" data-mission="${mission.Id}" title="Click for mission info/calc">&#9432;</a>`;
 }
 
 var scriptedRewardIds = null;
@@ -1175,8 +1175,7 @@ function getIndustriesBasicSimData(industryId) {
 }
 
 function updateEstimations() {
-  $('#estimation').text('');
-  $('#estimation').removeAttr('style');
+  $('span[id=estimation]').remove();
   $('#estimationButton').attr('disabled', 'true');
   $('#estimationButton').addClass('disabled');   
 
@@ -1227,23 +1226,24 @@ function updateEstimations() {
       }
       let result = simulateProductionMission(simData);
 
-      if (result == -1) {
-        $(`#estimation[data-mission=${mission.Id}`).html(`<br>ETA: More than ${simData.Config.MaxDays} days. Increase max day limit.`);
-        $(`#estimation[data-mission=${mission.Id}`).css('color','red');
+      let estimationElement = $(`<span id="estimation"></span>`);
+      if (result == -1) {        
+        estimationElement.html(`<br>ETA: More than ${simData.Config.MaxDays} days. Increase max day limit.`);
+        estimationElement.css('color','red');
       } else if (result == 0) {
-        $(`#estimation[data-mission=${mission.Id}`).html(`<br>Completed`);
-        $(`#estimation[data-mission=${mission.Id}`).css('color','green');
+        estimationElement.html(`<br>Completed`);
+        estimationElement.css('color','green');
       } else {
         let status = `<br>ETA: ${toEta(result)}`;
         if (resultComrade>0) {
           status += `<br>ComradeTime: ${toEta(resultComrade)}`;
         }
         
-        $(`#estimation[data-mission=${mission.Id}`).html(status);
-        $(`#estimation[data-mission=${mission.Id}`).css('color','black');
+        estimationElement.html(status);
+        estimationElement.css('color','black');
       }
-      
-      $(`#estimation[data-mission=${mission.Id}`).effect('highlight', {}, 2000);
+      $(`#btn-${mission.Id}`).append(estimationElement);
+      estimationElement.effect('highlight', {}, 2000);
     }
   }
 
