@@ -2,10 +2,11 @@ var missionData = {}; //  The main data structure used to store the current stat
 var missionCompletionTimes = {}; // Maps missionId's to when you completed them.  Can be viewed in the info popup of completed missions.
 var currentMode = "main"; 
 var currentMainRank = 1;
-var currentEventTheme = "";  // e.g. "space" or "ninja".  Primarily used to locate icons.
+var eventScheduleInfo = null;  // The main schedule metadata associated with the current LteEvent
 
 function main() {
   loadModeSettings();
+  initializeLocalization();
   initializeMissionData();
   initializeInfoPopup();
   loadSaveData();
@@ -47,28 +48,166 @@ function loadModeSettings() {
   $('#mode-select-title').text(title);
   $('#mode-select-title').addClass("show");
   
-  // Determine DATA.event and EVENT_ID based on the Schedule
+  // Determine eventScheduleInfo, DATA.event and EVENT_ID based on the Schedule
   if (currentMode == "event") {
-    let now = new Date();
+    eventScheduleInfo = getCurrentEventInfo();
     
-    // We append "Z" to EndTime's ISO8601 format to ensure it is interpretted as being GMT (instead of local time).
-    let prevEventIndex = SCHEDULE.Schedule.findIndex(event  => new Date(event.EndTime + "Z") < now);
-    let curEventIndex = prevEventIndex - 1; // schedule is ordered from newest to oldest.
-    
-    if (curEventIndex < 0) {
+    if (!eventScheduleInfo) {
       $('#alertNoSchedule').addClass("show");
     } else {
-      EVENT_ID = SCHEDULE.Schedule[curEventIndex].LteId;
-      
-      let balanceId = SCHEDULE.Schedule[curEventIndex].BalanceId;
-      DATA["event"] = DATA[balanceId];
-      currentEventTheme = balanceId.split("-")[0]; // get "ninja" from "ninja-bal-1"
+      EVENT_ID = eventScheduleInfo.LteId;
+      DATA.event = DATA[eventScheduleInfo.BalanceId];
     }
   }
   
   // Set up the icon for the "All Generators" button in the navbar
   let firstResourceId = getData().Resources[0].Id;
   $('#viewAllGeneratorsButton').attr('style', `background-image:url('${getImageDirectory()}/${firstResourceId}.png`);
+}
+
+// Returns the current event info based on the time and the schedule's cycles
+function getCurrentEventInfo() {
+  let DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  let now = new Date();
+  
+  // Start by checking to see if we're off-cycle in a specific "one-off" event.
+  let oneOffEvent = SCHEDULE_CYCLES.LteOneOff.find( lte => isBetweenEventDates(now, lte) );
+  
+  if (oneOffEvent) {
+    // Non-legacy one-off's don't currently have a unique identifier, so let's use the startTime's timestamp.
+    let lteId = oneOffEvent.LegacyLteId || (new Date(oneOffEvent.StartTime + "Z")).getTime();
+    
+    return {
+      LteId: lteId,
+      BalanceId: oneOffEvent.BalanceId,
+      ThemeId: oneOffEvent.ThemeId,
+      Rewards: getRewardsById(oneOffEvent.RewardId)
+    };
+  }
+  
+  // Since we're not in a one-off, we must be on a cycle.  But first we must figure out which cycle.
+  let cycle = SCHEDULE_CYCLES.LteSchedule.find( lte => isBetweenEventDates(now, lte) );
+  
+  if (!cycle) {
+    console.log("ERROR: Could not find event or cycle for today's date.");
+    return null;
+  }
+  
+  // Now we must figure out when events actually start each week for the given cycle.
+  // We start by finding the first StartDay (usually Thursday) in the cycle.
+  let goalDayOfWeek = DAYS.indexOf(cycle.StartDayOfTheWeek);
+  let firstStartTime = new Date(cycle.StartTime + "Z");
+  
+  if (goalDayOfWeek == -1) {
+    console.log(`ERROR: Cannot understand day of week: ${cycle.StartDayOfTheWeek}`);
+    return null;
+  }
+  
+  while (firstStartTime.getUTCDay() != goalDayOfWeek) {
+    firstStartTime.setUTCDate(firstStartTime.getUTCDate() + 1);
+  }
+  
+  firstStartTime.setUTCHours(cycle.StartHourUTC);
+  
+  // We want to show the event after the last one ends
+  // Currently, this means CurrentEvent.StartTime + 100h - 1 week
+  let firstShowTime = new Date(firstStartTime);
+  firstShowTime.setUTCHours(firstShowTime.getUTCHours() + 100);
+  firstShowTime.setUTCDate(firstShowTime.getUTCDate() - 7);
+  
+  // Calculate how many weeks/events since the start of the period.
+  let weeksSinceStart = Math.floor((new Date() - firstShowTime) / (604800000)); // 604.8M milliseconds per week
+  
+  // Since one-off's can appear inside of cycles, we need to subtract a week for each week an internal one-off is running.
+  weeksSinceStart -= getOneOffWeekCount(cycle);
+  
+  let eventId = parseInt(cycle.EventIdStartValue) + weeksSinceStart;
+  let balanceId = cycle.LteBalanceIds[weeksSinceStart % cycle.LteBalanceIds.length];
+  let rewardId = cycle.LteRewardIds[weeksSinceStart % cycle.LteRewardIds.length];
+  let themeId = SCHEDULE_CYCLES.LteBalanceData.find(bal => bal.BalanceId == balanceId).ThemeId;
+  
+  let startTime = new Date(firstStartTime);
+  startTime.setUTCDate(startTime.getUTCDate() + 7 * weeksSinceStart);
+  
+  let endTime = new Date(startTime);
+  endTime.setUTCHours(endTime.getUTCHours() + 100);
+  
+  return {
+    LteId: eventId,
+    BalanceId: balanceId,
+    ThemeId: themeId,
+    StartTime: startTime,
+    EndTime: endTime,
+    Rewards: getRewardsById(rewardId)
+  };
+}
+
+function isBetweenEventDates(now, eventSchedule) {
+  let endTime = eventSchedule.EndTime;
+  
+  // Start/EndTime can either be a Date or a string that needs to be converted to a date.
+  if (!(endTime instanceof Date)) {
+    // We append "Z" to EndTime's ISO8601 format to ensure it is interpretted as being GMT (instead of local time).
+    endTime = new Date(endTime + "Z");
+  }
+  
+  // There are 168 (7*24) hours in a week, so there are 68h between events
+  // We want to switch to the event right after the last one ends (i.e., 68 hours before this starts)
+  let startTime = eventSchedule.StartTime;
+  if (!(startTime instanceof Date)) {
+    startTime = new Date(startTime + "Z");
+  }
+  startTime.setUTCHours(startTime.getUTCHours() - 68);
+  
+  return (startTime < now) && (now <= endTime);
+}
+
+// Returns the number of weeks in the current cycle that have been taken up by one-off events (e.g., a one-off crusade and santa would take 3 weeks)
+function getOneOffWeekCount(cycle) {
+  // We append "Z" to StartTime's ISO8601 format to ensure it is interpretted as being GMT (instead of local time).
+  let cycleBounds = {
+    StartTime: new Date(cycle.StartTime + "Z"),
+    EndTime: new Date()
+  };
+  
+  let internalOneOffs = SCHEDULE_CYCLES.LteOneOff.filter( lte => {
+    let lteStart = new Date(lte.StartTime + "Z");
+    let lteEnd = new Date(lte.EndTime + "Z");
+    return isBetweenEventDates(lteStart, cycleBounds) || isBetweenEventDates(lteEnd, cycleBounds);
+  });
+  
+  // For each internal one-off, add up the number of weeks it will take
+  return internalOneOffs.reduce( (oneOffWeeks, lte) => {
+    let lteStart = new Date(lte.StartTime + "Z");
+    let lteEnd = new Date(lte.EndTime + "Z");
+    
+    // A more robust solution might count the number of event start days, but counting weeks is close.
+    return oneOffWeeks + Math.floor((lteEnd - lteStart) / 604800000) + 1; // 604.8M milliseconds per week
+  }, 0);
+}
+
+// Returns just the rank rewards array for a given rewardId
+function getRewardsById(rewardId) {
+  let reward = SCHEDULE_CYCLES.LteRewards.find(r => r.RewardId == rewardId);
+  if (reward) {
+    return reward.Rewards;
+  } else {
+    return [];
+  }
+}
+
+// Sets up ENGLISH_MAP based on ENGLISH_LOCALIZATION_STRING
+function initializeLocalization() {
+  // Get all lines in the form key=value.  Values may include anything but real new lines.
+  let lines = ENGLISH_LOCALIZATION_STRING.split(/\r?\n/);
+  
+  for (let line of lines) {
+    let keyValue = line.match(/(.*?)=(.*)/);
+    
+    if (keyValue) {
+      ENGLISH_MAP[keyValue[1]] = keyValue[2];
+    }
+  }
 }
 
 // Sets up missionData based on game data and your save data.
@@ -251,11 +390,19 @@ function loadEventSaveData() {
   
   // Now load mission progress
   let loadedEventId = getLocal("event", "Id");
+  if (loadedEventId == null) {
+    loadedEventId = EVENT_ID;
+    setLocal("event", "Id", EVENT_ID);
+  }
+  
   let loadedEventVersion = getLocal("event", "Version");
-  if ((loadedEventId != null && loadedEventId != EVENT_ID) ||
-       (loadedEventVersion != null && loadedEventVersion != EVENT_VERSION)) {
+  if (loadedEventVersion == null) {
+    loadedEventVersion = EVENT_VERSION;
+    setLocal("event", "Version", EVENT_VERSION);
+  }
+  
+  if (loadedEventId != EVENT_ID || loadedEventVersion != EVENT_VERSION) {
     // This save is from a previous event, so let's clear our save.
-    // TODO: It might be nice to inform the user this just happened besides the log.
     console.log(`Event ${loadedEventId} version ${loadedEventVersion} is outdated.  Clearing save data.`);
     removeLocal("event", "Completed");
     removeLocal("event", "FormValues");
@@ -381,11 +528,8 @@ function renderMissions() {
   
   let missionEtas = getMissionEtas();
   
-  let eventScheduleInfo;  
   let sortedRanks;
   if (currentMode == "event") {
-    eventScheduleInfo = SCHEDULE.Schedule.find(s => s.LteId == EVENT_ID);
-    
     sortedRanks = Object.keys(missionData);
     sortedRanks.splice(sortedRanks.indexOf("Completed"), 1);
     sortedRanks.splice(sortedRanks.indexOf("Current"), 1);
@@ -446,7 +590,7 @@ function renderMissions() {
       
       let rankResearchers = getData().Researchers.filter(r => r.PlayerRankUnlock == rank);
       if (rankResearchers.length > 0) {
-        let rankResearcherDescriptions = rankResearchers.map(r => `<div class='resourceIcon cardIcon'>&nbsp;</div>${r.Name}: <em>${getResearcherBasicDetails(r)}</em>`);
+        let rankResearcherDescriptions = rankResearchers.map(r => `<div class='resourceIcon cardIcon'>&nbsp;</div>${researcherName(r)}: <em>${getResearcherBasicDetails(r)}</em>`);
         let rankResearcherText = `<strong>New Researchers:</strong><br />${rankResearcherDescriptions.join("<br /><br />")}`;
         popupHtml += `${popupHtml ? "<hr />" : ""}${rankResearcherText}`;
       }
@@ -463,9 +607,9 @@ function renderMissions() {
     if (rank == "Completed" && missionData.Completed.Remaining.length == 0) {
       missionHtml += `<ul><li class="my-1">Click <strong>Current</strong> missions to move them to Completed.</li>`;
       missionHtml += `<li class="my-1">Click <strong>Completed</strong> missions to move them back to Current.</li>`;
-      missionHtml += `<li class="my-1">Click this tab's <strong>toggle</strong> in the top-right &UpperRightArrow; to hide Completed missions.</li>`;
-      missionHtml += `<li class="my-1">Click the &#9432; button next to a mission to access its <strong>Calculator</strong>.</li>`;
-      missionHtml += `<li class="my-1">If the <span class="scriptedRewardInfo">&#9432;</span> is bold, you can also view the <strong>pre-scripted rewards</strong>.</li>`;
+      missionHtml += `<li class="my-1">Click this tab's toggle in the top-right &UpperRightArrow; to <strong>hide Completed</strong> missions.</li>`;
+      missionHtml += `<li class="my-1">Click the capsule <span class="resourceIcon wood">&nbsp;</span> next to a mission to access its <strong>Calculator</strong>.</li>`;
+      missionHtml += `<li class="my-1">If the capsule <span class="scriptedRewardInfo resourceIcon wood">&nbsp;</span> is circled, you can also view the <strong>pre-scripted rewards</strong>.</li>`;
       missionHtml += `<li class="my-1">Got <strong>questions?</strong>  Check out the <a href="https://docs.google.com/document/d/1a314ZQM1f4ggFCtsC__Nb3B_1Hrc02cS0ZhY7_T08v8/">Game Guide/FAQ</a>, <a href="https://discord.gg/VPa4WTM">Discord</a>, or <a href="https://reddit.com/r/AdventureCommunist/">Reddit</a>.</li></ul>`;
     }
     
@@ -588,9 +732,26 @@ function renderMissionButton(mission, rank, missionEtas) {
     buttonClass += `${buttonOutlineStyle}-secondary`;
   }
   
-  let infoClass = hasScriptedReward(mission) ? "scriptedRewardInfo" : ""; 
+  let rewardImageClasses = getRewardImageClass(mission);
   
-  return `<button id="button-${mission.Id}" class="btn ${buttonClass}" onclick="clickMission('${mission.Id}')" title="${buttonDescription}">${describeMission(mission)}</button><a href="#" class="btn btn-link infoButton ${infoClass}" data-toggle="modal" data-target="#infoPopup" data-mission="${mission.Id}" title="Click for mission info/calc">&#9432;</a>`;
+  return `<button id="button-${mission.Id}" class="btn ${buttonClass}" onclick="clickMission('${mission.Id}')" title="${buttonDescription}">${describeMission(mission)}</button><a href="#" class="infoButton ${rewardImageClasses} resourceIcon ml-1" data-toggle="modal" data-target="#infoPopup" data-mission="${mission.Id}" title="Click for mission info/calc">&nbsp;</a>`;
+}
+
+// Returns the css class(es) of the reward associated with a given mission
+function getRewardImageClass(mission) {
+  if (mission.Reward.Reward != "Gacha") {
+    return "wood scriptedRewardInfo"; // Default to wood capsule icons for unusual rewards
+  }
+  
+  let gacha = getData().GachaLootTable.find(gacha => gacha.Id == mission.Reward.RewardId);
+  
+  if (gacha.Type != "Scripted") {
+    return gacha.Id;
+    
+  } else {
+    let script = getData().GachaScripts.find(script => script.GachaId == gacha.Id);
+    return `${script.MimicGachaId} scriptedRewardInfo`;
+  }
 }
 
 // Returns a formatted string that's used for full eta descriptions for missions
@@ -703,8 +864,8 @@ function clickMission(missionId) {
   }
 }
 
-// Converts numbers to AdCom style. bigNum(1E21) => "1 CC"
-function bigNum(x, minimumCutoff = 1e+6, significantDigits = 100) {
+// Converts numbers to AdCom style. bigNum(1E21) => "1 CC", significantCharacters includes the decimal point
+function bigNum(x, minimumCutoff = 1e+6, significantCharacters = 100) {
   if (x < minimumCutoff) {
     return x.toLocaleString();
   }
@@ -712,7 +873,8 @@ function bigNum(x, minimumCutoff = 1e+6, significantDigits = 100) {
   let digits = Math.floor(Math.log10(x));
   let thousands = Math.floor(digits / 3);
   let mantissa = x / Math.pow(10, thousands * 3);
-  return `${+mantissa.toFixed(2).slice(0, significantDigits + 1)} ${POWERS[thousands - 1]}`;
+  let numberString = mantissa.toLocaleString(undefined, {maximumFractionDigits: 2}).slice(0, significantCharacters + 1);
+  return `${numberString} ${POWERS[thousands - 1]}`;
 }
 
 // This is like bigNum but enforces 3 sig figs after 9999
@@ -731,7 +893,7 @@ function fromBigNum(x) {
   }
 
   // Grab digits and the letters, and filter out anything missing.
-  let split = [.../([\d\.,]+)? *(\w+)?/g.exec(x)].filter((y,i) => y != undefined && i>0);
+  let split = [.../([\d\., ]+)? *(\w+)?/g.exec(x)].filter((y,i) => y != undefined && i>0);
   
   if (split.length == 1) {
     return parseLocaleNumber(split[0]);
@@ -749,8 +911,18 @@ function fromBigNum(x) {
 
 /* From https://stackoverflow.com/questions/12004808/does-javascript-take-local-decimal-separators-into-account/42213804#42213804 */
 function parseLocaleNumber(stringNumber) {
-  var thousandSeparator = (1111).toLocaleString().replace(/1/g, '');
-  var decimalSeparator = (1.1).toLocaleString().replace(/1/g, '');
+  var decimalSeparator = (1.1).toLocaleString().replace(/1/g, '') || "."; // This is typically "." (default) or ","
+  
+  var thousandSeparator = (11111).toLocaleString().replace(/1/g, ''); // This is typically "," "." or " " (default based on decimal)
+  
+  // If there is no thousand separator, use the opposite of the decimal seperator
+  if (!thousandSeparator) {
+    if (decimalSeparator != ",") {
+      thousandSeparator = ",";
+    } else {
+      thousandSeparator = ".";
+    }
+  }
 
   return Number(stringNumber
     .replace(new RegExp('\\' + thousandSeparator, 'g'), '')
@@ -782,20 +954,25 @@ function getResource(id) {
   return resourcesById[id];
 }
 
-function resourceName(name) {
-  let resource = getResource(name);
-  return resource.Plural;
-  /* Let's test without for a bit and see how it feels
-  if ('StartingQty' in resource) {
-    return resource.Plural;
-  } else {
-    return resource.Singular;
-  }
-  */
+function resourceName(resourceId) {
+  return ENGLISH_MAP[`resource.${resourceId}.plural`];
 }
 
-function industryName(name) {
-  upperCaseFirstLetter(name);
+function industryName(industryId) {
+  // We lowercase since the game is somewhat inconsistant with industry capitalization
+  return ENGLISH_MAP[industryId.toLowerCase()];
+}
+
+// researcherIdOrObj can either be a root.Researchers object or a string id
+function researcherName(researcherIdOrObj) {
+  let id = "";
+  if (typeof researcherIdOrObj === 'string' || researcherIdOrObj instanceof String) {
+    id = researcherIdOrObj;
+  } else  if (researcherIdOrObj && 'Id' in researcherIdOrObj) {
+    id = researcherIdOrObj.Id;
+  }
+  
+  return ENGLISH_MAP[`researcher.${id}.name`]
 }
 
 function upperCaseFirstLetter(name) {
@@ -882,7 +1059,7 @@ function describeReward(reward) {
 // Given a root.Researchers object, returns an html string with a clickable version of their name with a popover description.
 function describeResearcher(researcher) {
   let details = getResearcherFullDetailsHtml(researcher);
-  return `<a tabindex="0" class="researcherName" role="button" data-toggle="popover" data-placement="bottom" data-trigger="focus" data-content="${details}" data-html="true"><div class="resourceIcon cardIcon">&nbsp;</div>${researcher.Name}</a>`;
+  return `<a tabindex="0" class="researcherName" role="button" data-toggle="popover" data-placement="bottom" data-trigger="focus" data-content="${details}" data-html="true"><div class="resourceIcon cardIcon">&nbsp;</div>${researcherName(researcher)}</a>`;
 }
 
 // Given a root.Researchers object, returns an html description of that researcher's effect, its unlock rank, and its first guaranteed mission
@@ -933,7 +1110,7 @@ function getResearcherBasicDetails(researcher) {
       if (resources) {
         return `Multiplies output of ${resourceName(resources.Id)} by ${vals[0]}x/${vals[1]}x/${vals[2]}x/...`;
       } else {
-        resources = researcher.TargetIds[0].split(/, ?/).map(ind => resourceName(getResourceByIndustry(ind).Id));
+        resources = researcher.TargetIds[0].split(/, ?/).map(ind => industryName(ind));
         if (resources.length == getData().Industries.length) {
           return `Multiplies output of all generators by ${vals[0]}x/${vals[1]}x/${vals[2]}x/...`;
         } else {
@@ -951,7 +1128,7 @@ function getResearcherBasicDetails(researcher) {
       if (resources.length == getData().Industries.length) {
         return `Increases crit chance of all generators by ${vals[0]}/${vals[1]}/${vals[2]}/...`;
       } else {
-        resources = resources.map(ind => resourceName(getResourceByIndustry(ind).Id)).join('/');
+        resources = resources.map(ind => industryName(ind)).join('/');
         return `Increases crit chance of every ${resources}-industry generator by ${vals[0]}/${vals[1]}/${vals[2]}/...`;
       }
       break;
@@ -961,7 +1138,7 @@ function getResearcherBasicDetails(researcher) {
               researcher.ExpoMultiplier * researcher.ExpoGrowth * researcher.ExpoGrowth,
               researcher.ExpoMultiplier * researcher.ExpoGrowth * researcher.ExpoGrowth * researcher.ExpoGrowth];
       // TargetIds[0] is a set of industries ("Baking, NorthPole, SnowArmy, SantaWorkshop")
-      resources = researcher.TargetIds[0].split(/, ?/).map(ind => resourceName(getResourceByIndustry(ind).Id));
+      resources = researcher.TargetIds[0].split(/, ?/).map(ind => industryName(ind));
       if (resources.length == getData().Industries.length) {
         return `Lowers cost of all generators by ${vals[0]}x/${vals[1]}x/${vals[2]}x/...`;
       } else {
@@ -974,7 +1151,7 @@ function getResearcherBasicDetails(researcher) {
               researcher.ExpoMultiplier * researcher.ExpoGrowth * researcher.ExpoGrowth,
               researcher.ExpoMultiplier * researcher.ExpoGrowth * researcher.ExpoGrowth * researcher.ExpoGrowth];
       // TargetIds[0] is a set of industries ("Baking, NorthPole, SnowArmy, SantaWorkshop")
-      resources = researcher.TargetIds[0].split(/, ?/).map(ind => resourceName(getResourceByIndustry(ind).Id));
+      resources = researcher.TargetIds[0].split(/, ?/).map(ind => industryName(ind));
       if (resources.length == getData().Industries.length) {
         return `Multiplies crit bonus of all generators by ${vals[0]}x/${vals[1]}x/${vals[2]}x/...`;
       } else {
@@ -1028,8 +1205,8 @@ var MISSION_EMOJI = {
 function getImageDirectory(overrideDirectory = "") {
   if (overrideDirectory) {
     return overrideDirectory;
-  } else if (currentEventTheme) {
-    return `img/${currentMode}/${currentEventTheme}`;
+  } else if (eventScheduleInfo && eventScheduleInfo.ThemeId) {
+    return `img/${currentMode}/${eventScheduleInfo.ThemeId}`;
   } else {
     return `img/${currentMode}`;
   }
@@ -1636,7 +1813,8 @@ function describeGenerator(generator, researchers, formValues) {
   
   html += `<br /><br /><strong>Generates:</strong><br />`;
   
-  let genTime = generator.BaseCompletionTime / Math.max(genValues.Speed, 1);
+  genValues.Speed = genValues.Speed || 1;
+  let genTime = generator.BaseCompletionTime / genValues.Speed;
   
   let qtyProduced = generator.Generate.Qty * genValues.Power;
   html += `<img class='resourceIcon mr-1' src='${imgDirectory}/${generator.Generate.Resource}.png' title='${resourceName(generator.Generate.Resource)}'>${shortBigNum(qtyProduced)} `;
@@ -1667,7 +1845,7 @@ function describeGenerator(generator, researchers, formValues) {
   html += `<br /><br /><strong>Automator:</strong><br />`;
   
   let autoResearcher = getData().Researchers.find(r => r.ModType == "GenManagerAndSpeedMult" && r.TargetIds[0] == generator.Id);
-  html += `<div class='resourceIcon cardIcon mr-1'>&nbsp;</div>${autoResearcher.Name}<br />`;
+  html += `<div class='resourceIcon cardIcon mr-1'>&nbsp;</div>${researcherName(autoResearcher)}<br />`;
   html += getResearcherFullDetailsHtml(autoResearcher);
   
   return html;
@@ -1735,7 +1913,7 @@ function updateTabResearcher(researcher) {
   
   let researcherValue = getValueForResearcherLevel(researcher, level);
   let valueString = "";
-  if (level > 0) {
+  if (level != 0) {
     if (researcher.ExpoMultiplier) {
       valueString = `x${shortBigNum(researcherValue)}`;
     } else {
@@ -1743,13 +1921,35 @@ function updateTabResearcher(researcher) {
     }
   }
   
-  let downVisibilityClass = (level <= 0) ? "invisible" : "visible";
-  let downHtml = `<a onclick="clickLevelResearcher('${researcher.Id}', ${level - 1})" role="button" title="Level ${researcher.Name} down to ${level - 1}">&#x25BC;</a>`;
+  // -1 is a special case for level meaning "custom value"
+  // Custom values get an emphasis
+  let levelString = `Level ${level}`;
+  if (level == -1) {
+    valueString = `<strong>${valueString}</strong>`;
+    levelString = "Custom";
+  }
+  
+  let downVisibilityClass = (level <= -1) ? "invisible" : "visible";
+  let downColorClass, downTitle, downLabel;
+  if (level > 0) {
+    // Red down arrow for decreasing researcher level.
+    downColorClass = "text-danger";
+    downTitle = `Level ${researcherName(researcher)} down to ${level - 1}`;
+    downLabel = "&#x25BC;";
+  } else {
+    // Yellow '#' for setting a specific researcher value
+    downColorClass = "text-warning";
+    downTitle = "Set custom value (esp. for manual running)";
+    downLabel = "#";
+  }
+  
+  let downHtml = `<a onclick="clickLevelResearcher('${researcher.Id}', ${level - 1})" role="button" title="${downTitle}" class="${downColorClass}">${downLabel}</a>`;
+  
   let maxLevel = getData().ResearcherRankCosts.find(cost => cost.Rarity == researcher.Rarity).Quantity.length + 1;
   let upVisibilityClass = (level >= maxLevel) ? "invisible" : "visible";
-  let upHtml = `<a onclick="clickLevelResearcher('${researcher.Id}', ${level + 1})" role="button" title="Level ${researcher.Name} up to ${level + 1}">&#x25B2;</a>`;
+  let upHtml = `<a onclick="clickLevelResearcher('${researcher.Id}', ${level + 1})" role="button" title="Level ${researcherName(researcher)} up to ${level + 1}">&#x25B2;</a>`;
   
-  $(`.modal.show #${researcher.Id}-level`).html(`Level ${level}`);
+  $(`.modal.show #${researcher.Id}-level`).html(levelString);
   $(`.modal.show #${researcher.Id}-value`).html(valueString);
   $(`.modal.show #${researcher.Id}-down-button`).removeClass("visible invisible").addClass(downVisibilityClass).html(downHtml);
   $(`.modal.show #${researcher.Id}-up-button`).removeClass("visible invisible").addClass(upVisibilityClass).html(upHtml);
@@ -1796,7 +1996,8 @@ function getResearcherCard(researcher, formValues) {
   let level = formValues.ResearcherLevels[researcher.Id] || 0;
   let researcherValue = getValueForResearcherLevel(researcher, level);
   let valueString = "";
-  if (level > 0) {
+  
+  if (level != 0) {
     if (researcher.ExpoMultiplier) {
       valueString = `x${shortBigNum(researcherValue)}`;
     } else {
@@ -1804,24 +2005,45 @@ function getResearcherCard(researcher, formValues) {
     }
   }
   
-  let downVisibilityClass = (level <= 0) ? "invisible" : "visible";
+  // -1 is a special case for level meaning "custom value."
+  // Custom values get an emphasis
+  let levelString = `Level ${level}`;
+  if (level == -1) {
+    valueString = `<strong>${valueString}</strong>`;
+    levelString = "Custom";
+  }
+  
+  let downVisibilityClass = (level <= -1) ? "invisible" : "visible";
+  let downColorClass, downTitle, downLabel;
+  if (level > 0) {
+    // Red down arrow for decreasing researcher level.
+    downColorClass = "text-danger";
+    downTitle = `Level ${researcherName(researcher)} down to ${level - 1}`;
+    downLabel = "&#x25BC;";
+  } else {
+    // Yellow '#' for setting a specific researcher value
+    downColorClass = "text-warning";
+    downTitle = "Set custom value (esp. for manual running)";
+    downLabel = "#";
+  }
+  
   let maxLevel = getData().ResearcherRankCosts.find(cost => cost.Rarity == researcher.Rarity).Quantity.length + 1;
   let upVisibilityClass = (level >= maxLevel) ? "invisible" : "visible";
   
-  let popupTitle = researcher.Name;
+  let popupTitle = researcherName(researcher);
   let popupBody = getResearcherFullDetailsHtml(researcher);
   
   return `
     <a tabindex="0" class="researcherName" role="button" data-toggle="popover" data-placement="top" data-trigger="focus" data-title="${popupTitle}" data-content="${popupBody}" data-html="true">
       <div class="researcherCard ${rarityClass} mx-auto" style="background-image: url('${imgDirectory}/${researcher.Id}.png');">
         <div class="researcherIcon float-right" style="background-image: url('${targetIconUrl}');">&nbsp;</div>
-        <div id="${researcher.Id}-level" class="researcherLevel text-center">Level ${level}</div>
+        <div id="${researcher.Id}-level" class="researcherLevel text-center">${levelString}</div>
       </div>
     </a>
 
     <div class="my-2 text-center">
-      <div id="${researcher.Id}-down-button" class="${downVisibilityClass} float-left researcherLevelButton text-danger">
-        <a onclick="clickLevelResearcher('${researcher.Id}', ${level - 1})" role="button" title="Level ${researcher.Name} down to ${level - 1}">&#x25BC;</a>
+      <div id="${researcher.Id}-down-button" class="${downVisibilityClass} float-left researcherLevelButton ${downColorClass}">
+        <a onclick="clickLevelResearcher('${researcher.Id}', ${level - 1})" role="button" title="${downTitle}">${downLabel}</a>
       </div>
       
       
@@ -1829,7 +2051,7 @@ function getResearcherCard(researcher, formValues) {
       <span id="${researcher.Id}-value">${valueString}</span>
       
       <div id="${researcher.Id}-up-button" class="${upVisibilityClass} researcherLevelButton float-right text-success">
-        <a onclick="clickLevelResearcher('${researcher.Id}', ${level + 1})" role="button" title="Level ${researcher.Name} up to ${level + 1}">&#x25B2;</a>
+        <a onclick="clickLevelResearcher('${researcher.Id}', ${level + 1})" role="button" title="Level ${researcherName(researcher)} up to ${level + 1}">&#x25B2;</a>
       </div>
     </div>`;
 }
@@ -1870,7 +2092,7 @@ function getPropagandaBoostCard(formValues) {
     </a>`;
 }
 
-// Returns the multiplier (>1x) or chance (0-1) given a researcher and their level.
+// Returns the multiplier (>1x) or chance (0-1) given a researcher and their level.  If level is -1, the user's override is returned.
 function getValueForResearcherLevel(researcher, level) {
   if (!level) {
     if (researcher.ExpoMultiplier && researcher.ModType != "GenManagerAndSpeedMult") {
@@ -1881,7 +2103,10 @@ function getValueForResearcherLevel(researcher, level) {
     }
   }
   
-  if (researcher.ExpoMultiplier) {
+  if (level == -1) {
+    // This is a special case that indicates a custom value.
+    return getFormValuesObject().ResearcherOverrides[researcher.Id];
+  } else if (researcher.ExpoMultiplier) {
     // It's exponential
     return researcher.ExpoMultiplier * Math.pow(researcher.ExpoGrowth, level);
   } else {
@@ -1897,11 +2122,34 @@ function getValueForResearcherWithForm(researcher, formValues) {
 
 // Called when the level down/up buttons are clicked
 function clickLevelResearcher(researcherId, newLevelValue) {
+  let researcher = getData().Researchers.find(r => r.Id == researcherId);
+  
   let formValues = getFormValuesObject();
   formValues.ResearcherLevels[researcherId] = newLevelValue;
+  formValues.ResearcherOverrides = formValues.ResearcherOverrides || {}; // This may not exist in older saves.
+  
+  // -1 is a special case meaning "custom value"
+  if (newLevelValue == -1) {
+    let commonAddendum = "";
+    if (researcher.Rarity == "Common" || researcher.Rarity == "LteCommon") {
+      commonAddendum = "\n(Setting a Common to 1 simulates constantly running it manually, 0.5 half the time, etc)";
+    }
+  
+    let previousOverride = formValues.ResearcherOverrides[researcherId] || "";
+    
+    let customValue = prompt(`Enter custom value for ${researcherName(researcher)}.${commonAddendum}`, previousOverride);
+    
+    let customFloat = parseFloat(customValue);
+    if (!customValue || !customFloat) {
+      // User has entered a empty/invalid value, or cancelled, let's just return without saving changes.
+      return;
+    }
+    
+    formValues.ResearcherOverrides[researcherId] = customFloat;
+  }
+  
   saveFormValues(formValues);
   
-  let researcher = getData().Researchers.find(r => r.Id == researcherId);
   if (researcher && researcher.ModType == "TradePayoutMultiplier") {
     updateTradeTabTotals(researcher);
   } else {
@@ -2075,7 +2323,7 @@ function updateTradeTabTotals(researcher = null) {
   saveFormValues(formValues);
   
   // Fill in values in the trade tab.
-  $('#totalDerivedComrades').text(formValues.Trades.TotalComrades);
+  $('#totalDerivedComrades').text(bigNum(formValues.Trades.TotalComrades));
   
   let industryTrades = getIndustryTradeBreakdown(formValues);
   for (let industryTrade of industryTrades) {
@@ -2403,11 +2651,14 @@ function setupSimDataGenerators(simData, industryId, formValues, readSavedCounts
       }
     }
     
+    let unlockQty = generator.Unlock ? generator.Unlock.Threshold : 0;
+    
     simData.Generators.push(({
       Id: generator.Id,
       Resource: generator.Generate.Resource,
       QtyPerSec: generator.Generate.Qty / generator.BaseCompletionTime * genValues.Power * genValues.Speed * (genValues.CritChance * genValues.CritPower + 1 - genValues.CritChance),
-      Cost: costs
+      Cost: costs,
+      UnlockQty: unlockQty
     }));
     
     if (!readSavedCounts) {
@@ -2507,6 +2758,7 @@ function mergeObjects(left, right) {
 let NEW_FORM_VALUES_OBJECT = { 
   Config: {}, // e.g., 'AutoBuy': true
   ResearcherLevels: {}, // e.g., 'RS0011': 2
+  ResearcherOverrides: {}, // e.g., 'RS0011': 0.5
   Counts: {}, // e.g., 'land': {'worker': 10, ..., 'land': 150, 'resourceProgress': 100, 'TimeStamp': 1579683943747}
   Trades: {
     TotalComrades: 1,
@@ -2589,11 +2841,18 @@ function calcLimitedComrades(simData) {
 function simulateProductionMission(simData, deltaTime = 1.0) {
   // First, handle autobuy, if enabled.
   let autobuyGenerator = null;
+  let nextAutobuyGenerator = null;
+  
+  // search backwards through the generators for the first one with Qty > 0
   if (simData.Config.Autobuy) {
-    // search backwards through the generators for the first one with >0
     for (let genIndex = simData.Generators.length - 1; genIndex >= 0; genIndex--) {
       if (simData.Counts[simData.Generators[genIndex].Id] > 0) {
         autobuyGenerator = simData.Generators[genIndex];
+        
+        if (genIndex + 1 < simData.Generators.length && simData.Generators[genIndex + 1].QtyPerSec > 0) {
+          nextAutobuyGenerator = simData.Generators[genIndex + 1];
+        }
+        
         break;
       }
     }
@@ -2608,25 +2867,29 @@ function simulateProductionMission(simData, deltaTime = 1.0) {
       break;
     case "IndustryUnlocked":
       let industry = getData().Industries.find(i => i.Id == condition.ConditionId);
-      goals = [{ Resource: industry.UnlockCostResourceId, Qty: industry.UnlockCostResourceQty }];
+      goals = [{ Resource: industry.UnlockCostResourceId.toLowerCase(), Qty: industry.UnlockCostResourceQty }];
       break;
     case "ResourceQuantity":
-      // Instead of directly waiting until we get N generators, we figure out the cost difference
-      // This allows us not to be forced into autobuying (which actually isn't always better anyway!)
-      let gensNeeded = condition.Threshold - simData.Counts[condition.ConditionId];
-      for (let cost of simData.Generators.find(g => g.Id == condition.ConditionId).Cost) {
-        if (cost.Resource == "comrade") {
-          goals.push(({ Resource: "comradeProgress", Qty: cost.Qty * gensNeeded }));
-          simData.Counts["comradeProgress"] = simData.Counts["comrade"];
-        } else if (cost.Resource == simData.Generators[1].Resource) {
-          goals.push(({ Resource: "resourceProgress", Qty: cost.Qty * gensNeeded }));
-          simData.Counts["resourceProgress"] = simData.Counts[simData.Generators[1].Resource];
-        } else {
-          // the generator before it
-          goals.push(({ Resource: cost.Resource, Qty: cost.Qty * gensNeeded }));
+      if (simData.Config.Autobuy) {
+        // If Autobuy is enabled, we can assume reaching the condition is plausible
+        goals = [{ Resource: condition.ConditionId, Qty: condition.Threshold }];
+      } else {
+        // Instead of directly waiting until we get N generators, we figure out the cost difference
+        // This is since we might not be able to reach the condition directly without autobuy.
+        let gensNeeded = condition.Threshold - simData.Counts[condition.ConditionId];
+        for (let cost of simData.Generators.find(g => g.Id == condition.ConditionId).Cost) {
+          if (cost.Resource == "comrade") {
+            goals.push(({ Resource: "comradeProgress", Qty: cost.Qty * gensNeeded }));
+            simData.Counts["comradeProgress"] = simData.Counts["comrade"];
+          } else if (cost.Resource == simData.Generators[1].Resource) {
+            goals.push(({ Resource: "resourceProgress", Qty: cost.Qty * gensNeeded }));
+            simData.Counts["resourceProgress"] = simData.Counts[simData.Generators[1].Resource];
+          } else {
+            // the generator before it
+            goals.push(({ Resource: cost.Resource, Qty: cost.Qty * gensNeeded }));
+          }
         }
       }
-      //goal = { Resource: condition.ConditionId, Qty: condition.Threshold };
       break;
     default:
       console.log(`Error: Weird situation! Simulating unknown ConditionType=${condition.ConditionType}`);
@@ -2651,12 +2914,28 @@ function simulateProductionMission(simData, deltaTime = 1.0) {
     
     // After generating, handle autobuying
     if (autobuyGenerator) {
+      // First buy as many of the autobuyGenerator as possible
       let buyCount = getBuyCount(simData, autobuyGenerator);
       for (let cost of autobuyGenerator.Cost) {
         simData.Counts[cost.Resource] -= cost.Qty * buyCount;
       }
       simData.Counts[autobuyGenerator.Id] += buyCount;
+      
+      // Then check to see if the purchases have unlocked a new tier of generator.
+      if (nextAutobuyGenerator && simData.Counts[autobuyGenerator.Id] >= nextAutobuyGenerator.UnlockQty) {
+        autobuyGenerator = nextAutobuyGenerator;
+        simData.Counts[autobuyGenerator.Id] = 1;
+        
+        let autobuyGeneratorIndex = simData.Generators.indexOf(autobuyGenerator);
+        nextAutobuyGenerator = simData.Generators[autobuyGeneratorIndex + 1]; // may be undefined if at the last tier
+        
+        // If the next generator won't produce anything, don't switch to it.
+        if (nextAutobuyGenerator && nextAutobuyGenerator.QtyPerSec == 0) {
+          nextAutobuyGenerator = null;
+        }
+      }
     }
+    
   }
 
   if (time >= maxTime) {

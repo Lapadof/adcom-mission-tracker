@@ -143,6 +143,7 @@ input:checked + .slider:before {
 
 .infoButton, .infoButton:hover, .infoButton:focus {
   text-decoration: none;
+  vertical-align: middle;
 }
 
 .infoButton:hover {
@@ -150,7 +151,8 @@ input:checked + .slider:before {
 }
 
 .scriptedRewardInfo {
-  font-weight: bolder;
+  border:1px solid grey;
+  border-radius: 50%;
 }
 
 .calcTable {
