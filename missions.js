@@ -2605,9 +2605,7 @@ function getProductionSimDataFromForm() {
   getValueFromForm('#resources', 0, simData, formValues, resourceId, resourceId);
 
   if (mission.Condition.ConditionType == "ResourcesEarnedSinceSubscription") {
-    getValueFromForm('#resourceProgress', 0, simData, formValues, resourceId, 'resourceProgress');
-    simData.Config.SkipHours = getValueFromForm('#configSkipHours', 1, simData);
-    formValues.Config.SkipHours = simData.Config.SkipHours;
+    getValueFromForm('#resourceProgress', 0, simData, formValues, resourceId, 'resourceProgress');    
   }
   
   let comradesPerSec = getValueFromForm('#comradesPerSec', 0, simData);
@@ -2619,7 +2617,9 @@ function getProductionSimDataFromForm() {
   
   simData.Config.Autobuy = $('#configAutobuy').is(':checked');
   simData.Config.ComradeLimited = $('#configComradeLimited').is(':checked');  
-  
+
+  simData.Config.SkipHours = getValueFromForm('#configSkipHours', 0, simData);
+  formValues.Config.SkipHours = simData.Config.SkipHours;
   simData.Config.MaxDays = getValueFromForm('#configMaxDays', 1, simData);
   formValues.Config.MaxDays = simData.Config.MaxDays;
   
