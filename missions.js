@@ -1618,9 +1618,10 @@ function renderCalculator(mission) {
     html += `<hr /><div class="form-check"><input class="form-check-input" type="checkbox" value="" id="configAutobuy"><label class="form-check-label" for="configAutobuy">Auto-buy highest-tier generator</label></div>`;
     
     if (conditionType == "ResourceQuantity") {
-      html += `<div class="form-check"><input class="form-check-input" type="checkbox" value="" id="configComradeLimited" onclick="clickComradeLimited('${condition.ConditionId}')"><label class="form-check-label" for="configComradeLimited">Limited by comrades only</label></div>`;
+        html += `<div class="form-check"><input class="form-check-input" type="checkbox" value="" id="configComradeLimited" onclick="clickComradeLimited('${condition.ConditionId}')"><label class="form-check-label" for="configComradeLimited">Limited by comrades only</label></div>`;
     }
-    
+
+    html += `<div class="form-inline"><label for="configSkipHours" class="mr-2">Skip Hours:</label><input type="number" class="form-control w-25" min="0" value="0" id="configSkipHours" placeholder="Skip Hours"></div>`;        
     html += `<div class="form-inline"><label for="configMaxDays" class="mr-2">Max Days:</label><input type="number" class="form-control w-25" min="1" value="1" id="configMaxDays" placeholder="Max Days"> 
     <a class="btn btn-link infoButton" tabindex="-1" role="button" data-toggle="popover" data-trigger="focus" data-content="Higher Max Days allows you to simulate further, but increases time when simulation doesn't succeed.">&#9432;</a></div>`;
     
@@ -2605,6 +2606,8 @@ function getProductionSimDataFromForm() {
 
   if (mission.Condition.ConditionType == "ResourcesEarnedSinceSubscription") {
     getValueFromForm('#resourceProgress', 0, simData, formValues, resourceId, 'resourceProgress');
+    simData.Config.SkipHours = getValueFromForm('#configSkipHours', 1, simData);
+    formValues.Config.SkipHours = simData.Config.SkipHours;
   }
   
   let comradesPerSec = getValueFromForm('#comradesPerSec', 0, simData);
@@ -2896,16 +2899,19 @@ function simulateProductionMission(simData, deltaTime = 1.0) {
   }
     
   // Now do the iteration
+  let skipTime = simData.Config.SkipHours * 60 * 60; // convert skip hours to max seconds
   let maxTime = simData.Config.MaxDays * 24 * 60 * 60; // convert max days to max seconds
   let time;
-  for (time = 0; time < maxTime && !metGoals(simData, goals); time += deltaTime) {
+  for (time = 0; time < maxTime + skipTime && !metGoals(simData, goals); time += deltaTime) {
     // Run each generator, starting from comrades and lowest-tier first.
-    for (let genIndex in simData.Generators) {
-      let generator = simData.Generators[genIndex];
-      simData.Counts[generator.Resource] += simData.Counts[generator.Id] * generator.QtyPerSec * deltaTime;
-      
+      for (let genIndex in simData.Generators) {
+          let generator = simData.Generators[genIndex];
+          simData.Counts[generator.Resource] += simData.Counts[generator.Id] * generator.QtyPerSec * deltaTime;
+
       // index 0 & 1 make comrades & resources, so they also counts toward "comradeProgress" & "resourceProgress"
-      if (genIndex == 0) {
+      if (time < skipTime) {
+          // no progress.
+      } else if (genIndex == 0) {
         simData.Counts["comradeProgress"] += simData.Counts[generator.Id] * generator.QtyPerSec * deltaTime;
       } else if (genIndex == 1) {
         simData.Counts["resourceProgress"] += simData.Counts[generator.Id] * generator.QtyPerSec * deltaTime;
